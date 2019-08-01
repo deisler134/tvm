@@ -51,18 +51,16 @@ def _infer_value(input_val, params):
     return m.get_output(0)
 
 def _get_relay_op(op_name):
-    try:
-        op = getattr(_op, op_name)
-    except AttributeError:
+    ops = [_op, _op.nn, _op.image, _op.vision]
+    for operator in ops:
         try:
-            op = getattr(_op.nn, op_name)
+            op = getattr(operator, op_name)
+            return op
         except AttributeError:
-            op = getattr(_op.image, op_name)
+            continue
 
-    if not op:
-        raise tvm.error.OpNotImplemented(
-            'Operator {} is not supported for frontend TensorFlow.'.format(op_name))
-    return op
+    raise tvm.error.OpNotImplemented(
+        'Operator {} is not supported for frontend TensorFlow.'.format(op_name))
 
 class AttrCvt(object):
     """Common attribute converter. An AttrConverter instance is a callable:
@@ -611,6 +609,16 @@ def _matmul():
 
     return _impl
 
+def _batch_matmul():
+    def _impl(inputs, attr, params):
+        adj_x = attr['adj_x']
+        adj_y = attr['adj_y']
+        input_x = _op.transpose(inputs[0], axes=[0, 2, 1]) if adj_x else inputs[0]
+        input_y = _op.transpose(inputs[1], axes=[0, 2, 1]) if not adj_y else inputs[1]
+        ret = _get_relay_op('batch_matmul')(input_x, input_y)
+        return ret
+    return _impl
+
 def _undef():
     def _impl(inputs, attr, params):
         return _sym.__undef__()
@@ -823,7 +831,7 @@ def _fill():
         output_shape = attr['_output_shapes'][0]
         # Output shape must be defined to avoid errors. If any axis is not, we must
         # try to compute its shape.
-        if -1 in output_shape:
+        if output_shape is None or -1 in output_shape:
             output_shape = _infer_value(inputs[0], params).asnumpy().reshape([-1]).tolist()
 
         fill_arg = _get_num_param(params, inputs.pop(1))
@@ -1293,6 +1301,13 @@ def _prod():
         return _op.prod(inputs[0], int(axis), keepdims=keepdims)
     return _impl
 
+def _log1p():
+    # op description: https://www.tensorflow.org/api_docs/python/tf/math/log1p
+    def _impl(inputs, attr, params):
+        one = tvm.relay.const(1, attr['T'].name)
+        add_out = _get_relay_op('add')(inputs[0], one)
+        return _get_relay_op('log')(add_out)
+    return _impl
 
 # compatible operators that do NOT require any conversion.
 _identity_list = []
@@ -1309,6 +1324,8 @@ _convert_map = {
     'ArgMax'                            : _argx(_op.argmax, 'argmax'),
     'ArgMin'                            : _argx(_op.argmin, 'argmin'),
     'AvgPool'                           : _pooling('avg_pool'),
+    'BatchMatMul'                       : _batch_matmul(),
+    'BatchMatMulV2'                     : _batch_matmul(),
     'BatchNormWithGlobalNormalization'  : _batch_norm(),
     'BatchToSpaceND'                    : _batch_to_space_nd(),
     'BiasAdd'                           : _bias_add(),
@@ -1344,6 +1361,9 @@ _convert_map = {
     'Less'                              : _broadcast('less'),
     'LessEqual'                         : _broadcast('less_equal'),
     'Log'                               : AttrCvt('log'),
+    'Log1p'                             : _log1p(),
+    'Cos'                               : AttrCvt('cos'),
+    'Sin'                               : AttrCvt('sin'),
     'LogicalAnd'                        : _logical('logical_and'),
     'LogicalOr'                         : _logical('logical_or'),
     'LogicalNot'                        : _logical('logical_not'),
@@ -2030,15 +2050,6 @@ class GraphProto(object):
 
                 # Pass the target layout
                 attr["_target_layout"] = layout
-
-                #ToDo: Some of the tensorflow operators internaly maintain
-                #execution layers and its output name will the layer number along with
-                #graph node name.eg: Node name:- 'Model/RNN/cell_0/RnnCell', but the
-                #output name will be 'Model/RNN/cell_0/RnnCell:0'. In this case,
-                #the digit has to be ignored.
-                if ":" in node.input[0]:
-                    in_name, _ = node.input[0].split(':')
-                    node.input[0] = in_name
 
                 # Fill shapes for all inputs in a list
                 inputs = []

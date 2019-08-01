@@ -14,15 +14,15 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# pylint: disable=invalid-name,unused-variable,invalid-name,unused-argument
-"""Checks different x86 targets for target specific schedules"""
+import tvm
+from tvm import relay
+from tvm.relay.testing import resnet
+from tvm.relay import transform
 
-def check_skylake(target):
-    """
-    Checks if the target is skylake
-    """
+def test_change_batch_resnet():
+    net, params = resnet.get_workload()
+    new_net = transform.ChangeBatch({net["main"].params[0]: 0}, batch_size=123)(net)
+    assert new_net["main"].checked_type.ret_type == relay.TensorType((123, 1000))
 
-    for opt in target.options:
-        if opt == '-mcpu=skylake-avx512':
-            return True
-    return False
+if __name__ == "__main__":
+    test_change_batch_resnet()
